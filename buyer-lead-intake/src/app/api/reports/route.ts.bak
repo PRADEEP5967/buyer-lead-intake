@@ -1,0 +1,608 @@
+import { NextResponse } from 'next/server';
+import { prisma } from '@/lib/db';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth-options';
+
+// Define types for the API response
+type ReportMetrics = {
+  totalLeads: number;
+  newThisMonth: number;
+  monthlyChange: number;
+  convertedLeads: number;
+  conversionRate: number;
+  avgConversionTime: number;
+  conversionCount: number;
+  totalValue: number;
+  avgDealSize: number;
+};
+
+type ChartData = {
+  name: string;
+  value: number;
+};
+
+type ReportsResponse = {
+  metrics: ReportMetrics;
+  charts: {
+    leadsByStatus: ChartData[];
+    leadsBySource: ChartData[];
+    leadsByPropertyType: ChartData[];
+    conversionFunnel: ChartData[];
+    conversionTimeline: Array<{ month: string; avgDays: number }>;
+  };
+};
+
+type ConversionTimeData = {
+  avg_days_to_convert: number;
+  conversion_count: number;
+};
+
+type FunnelData = {
+  status: string;
+  count: number;
+};
+
+type MonthlyData = {
+  month: string;
+  avg_days_to_convert: number;
+};
+
+type DealValueData = {
+  total_value: number;
+};
+
+type DealSizeData = {
+  avg_deal_size: number;
+};
+
+type LeadStatusData = {
+  status: string;
+  _count: number;
+};
+
+type LeadSourceData = {
+  source: string | null;
+  _count: number;
+};
+
+type LeadPropertyTypeData = {
+  propertyType: string | null;
+  _count: number;
+};
+
+export async function GET() {
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.email) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
+    // Get date range for calculations
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    sixMonthsAgo.setHours(0, 0, 0, 0);
+
+    // Execute all database queries in parallel
+    const [
+      totalLeads,
+      newThisMonth,
+      newLastMonth,
+      convertedLeads,
+      leadsByStatus,
+      leadsBySource,
+      leadsByPropertyType,
+      conversionTimes,
+      funnelData,
+      monthlyConversionData,
+      totalDealValue,
+      avgDealSize
+    ] = await Promise.all<unknown>([
+      // Total leads
+      prisma.buyer.count(),
+      
+      // New this month
+      prisma.buyer.count({
+        where: {
+          createdAt: {
+            gte: startOfMonth,
+          },
+        },
+      }),
+      
+      // New last month
+      prisma.buyer.count({
+        where: {
+          createdAt: {
+            gte: startOfLastMonth,
+            lt: startOfMonth,
+          },
+        },
+      }),
+      
+      // Converted leads
+      prisma.buyer.count({
+        where: {
+          status: 'Converted',
+        },
+      }),
+      
+      // Leads by status
+      prisma.buyer.groupBy({
+        by: ['status'],
+        _count: true,
+      }),
+      
+      // Leads by source
+      prisma.buyer.groupBy({
+        by: ['source'],
+        where: {
+          source: {
+            not: null,
+          },
+        },
+        _count: true,
+      }),
+      
+      // Leads by property type
+      prisma.buyer.groupBy({
+        by: ['propertyType'],
+        where: {
+          propertyType: {
+            not: null,
+          },
+        },
+        _count: true,
+      }),
+      
+      // Conversion times
+      prisma.$queryRaw`
+        SELECT 
+          AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert,
+          COUNT(*) as conversion_count
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "updatedAt" > "createdAt"
+      `,
+      
+      // Funnel data
+      prisma.$queryRaw`
+        SELECT 
+          status,
+          COUNT(*) as count
+        FROM "Buyer"
+        GROUP BY status
+        ORDER BY 
+          CASE status
+            WHEN 'NEW' THEN 1
+            WHEN 'CONTACTED' THEN 2
+            WHEN 'QUALIFIED' THEN 3
+            WHEN 'PROPOSAL' THEN 4
+            WHEN 'NEGOTIATION' THEN 5
+            WHEN 'CONVERTED' THEN 6
+            ELSE 7
+          END
+      `,
+      
+      // Monthly conversion data (last 6 months)
+      prisma.$queryRaw`
+        SELECT 
+          TO_CHAR(DATE_TRUNC('month', "updatedAt"), 'Mon YYYY') as month,
+          AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert
+        FROM "Buyer"
+        WHERE 
+          status = 'CONVERTED' 
+          AND "updatedAt" >= ${sixMonthsAgo}
+          AND "updatedAt" > "createdAt"
+        GROUP BY DATE_TRUNC('month', "updatedAt")
+        ORDER BY DATE_TRUNC('month', "updatedAt") ASC
+      `,
+      
+      // Total deal value (sum of dealAmount for converted leads)
+      prisma.$queryRaw`
+        SELECT COALESCE(SUM("dealAmount"), 0) as total_value
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "dealAmount" IS NOT NULL
+      `,
+      
+      // Average deal size
+      prisma.$queryRaw`
+        SELECT COALESCE(AVG("dealAmount"), 0) as avg_deal_size
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "dealAmount" > 0
+      `
+    ]);
+      // Total leads
+      prisma.buyer.count(),
+      
+      // New this month
+      prisma.buyer.count({
+        where: {
+          createdAt: {
+            gte: startOfMonth,
+          },
+        },
+      }),
+      
+      // New last month (for comparison)
+      prisma.buyer.count({
+        where: {
+          createdAt: {
+            gte: startOfLastMonth,
+            lt: startOfMonth,
+          },
+        },
+      }),
+      
+      // Converted leads
+      prisma.buyer.count({
+        where: {
+          status: 'Converted',
+        },
+      }),
+      
+      // Leads by status
+      prisma.buyer.groupBy({
+        by: ['status'],
+        _count: {
+          status: true,
+        },
+      }),
+      
+      // Leads by source
+      prisma.buyer.groupBy({
+        by: ['source'],
+        where: {
+          source: {
+            not: null,
+          },
+        },
+        _count: true,
+      }),
+      
+      // Leads by property type
+      prisma.buyer.groupBy({
+        by: ['propertyType'],
+        where: {
+          propertyType: {
+            not: null,
+          },
+        },
+        _count: true,
+      }),
+      
+      // Conversion times
+      prisma.$queryRaw`
+        SELECT 
+          AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert,
+          COUNT(*) as conversion_count
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "updatedAt" > "createdAt"
+      `,
+      
+      // Funnel data
+      prisma.$queryRaw`
+        SELECT 
+          status,
+          COUNT(*) as count
+        FROM "Buyer"
+        GROUP BY status
+        ORDER BY 
+          CASE status
+            WHEN 'NEW' THEN 1
+            WHEN 'CONTACTED' THEN 2
+            WHEN 'QUALIFIED' THEN 3
+            WHEN 'PROPOSAL' THEN 4
+            WHEN 'NEGOTIATION' THEN 5
+            WHEN 'CONVERTED' THEN 6
+            ELSE 7
+          END
+      `,
+      
+      // Monthly conversion data (last 6 months)
+      prisma.$queryRaw`
+        SELECT 
+          TO_CHAR(DATE_TRUNC('month', "updatedAt"), 'Mon YYYY') as month,
+          AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert
+        FROM "Buyer"
+        WHERE 
+          status = 'CONVERTED' 
+          AND "updatedAt" >= ${sixMonthsAgo}
+          AND "updatedAt" > "createdAt"
+        GROUP BY DATE_TRUNC('month', "updatedAt")
+        ORDER BY DATE_TRUNC('month', "updatedAt") ASC
+      `,
+      
+      // Total deal value (sum of dealAmount for converted leads)
+      prisma.$queryRaw`
+        SELECT COALESCE(SUM("dealAmount"), 0) as total_value
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "dealAmount" IS NOT NULL
+      `,
+      
+      // Average deal size
+      prisma.$queryRaw`
+        SELECT COALESCE(AVG("dealAmount"), 0) as avg_deal_size
+        FROM "Buyer"
+        WHERE status = 'CONVERTED' AND "dealAmount" > 0
+      `
+    ]);
+
+    // Calculate percentage change
+    const monthlyChange = newLastMonth > 0 
+      ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100) 
+      : 0;
+
+    // Calculate conversion rate
+    const conversionRate = totalLeads > 0 
+      ? Math.round((convertedLeads / totalLeads) * 100) 
+      : 0;
+
+    // Format conversion time
+
+// Total deal value (sum of dealAmount for converted leads)
+prisma.$queryRaw`
+  SELECT COALESCE(SUM("dealAmount"), 0) as total_value
+  FROM "Buyer"
+  WHERE status = 'CONVERTED' AND "dealAmount" IS NOT NULL
+`,
+
+// Average deal size
+prisma.$queryRaw`
+  SELECT COALESCE(AVG("dealAmount"), 0) as avg_deal_size
+  FROM "Buyer"
+  WHERE status = 'CONVERTED' AND "dealAmount" > 0
+`
+]);
+
+// Total leads
+prisma.buyer.count(),
+
+// New this month
+prisma.buyer.count({
+  where: {
+    createdAt: {
+      gte: startOfMonth,
+    },
+  },
+}),
+
+// New last month (for comparison)
+prisma.buyer.count({
+  where: {
+    createdAt: {
+      gte: startOfLastMonth,
+      lt: startOfMonth,
+    },
+  },
+}),
+
+// Converted leads
+prisma.buyer.count({
+  where: {
+    status: 'Converted',
+  },
+}),
+
+// Leads by status
+prisma.buyer.groupBy({
+  by: ['status'],
+  _count: {
+    status: true,
+  },
+}),
+
+// Leads by source
+prisma.buyer.groupBy({
+  by: ['source'],
+  where: {
+    source: {
+      not: null,
+    },
+  },
+  _count: true,
+}),
+
+// Leads by property type
+prisma.buyer.groupBy({
+  by: ['propertyType'],
+  where: {
+    propertyType: {
+      not: null,
+    },
+  },
+  _count: true,
+}),
+
+// Conversion times
+prisma.$queryRaw`
+  SELECT 
+    AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert,
+    COUNT(*) as conversion_count
+  FROM "Buyer"
+  WHERE status = 'CONVERTED' AND "updatedAt" > "createdAt"
+`,
+
+// Funnel data
+prisma.$queryRaw`
+  SELECT 
+    status,
+    COUNT(*) as count
+  FROM "Buyer"
+  GROUP BY status
+  ORDER BY 
+    CASE status
+      WHEN 'NEW' THEN 1
+      WHEN 'CONTACTED' THEN 2
+      WHEN 'QUALIFIED' THEN 3
+      WHEN 'PROPOSAL' THEN 4
+      WHEN 'NEGOTIATION' THEN 5
+      WHEN 'CONVERTED' THEN 6
+      ELSE 7
+    END
+`,
+
+// Monthly conversion data (last 6 months)
+prisma.$queryRaw`
+  SELECT 
+    TO_CHAR(DATE_TRUNC('month', "updatedAt"), 'Mon YYYY') as month,
+    AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 86400) as avg_days_to_convert
+  FROM "Buyer"
+  WHERE 
+    status = 'CONVERTED' 
+    AND "updatedAt" >= ${sixMonthsAgo}
+    AND "updatedAt" > "createdAt"
+  GROUP BY DATE_TRUNC('month', "updatedAt")
+  ORDER BY DATE_TRUNC('month', "updatedAt") ASC
+`,
+
+// Total deal value (sum of dealAmount for converted leads)
+prisma.$queryRaw`
+  SELECT COALESCE(SUM("dealAmount"), 0) as total_value
+  FROM "Buyer"
+  WHERE status = 'CONVERTED' AND "dealAmount" IS NOT NULL
+`,
+
+// Average deal size
+prisma.$queryRaw`
+  SELECT COALESCE(AVG("dealAmount"), 0) as avg_deal_size
+  FROM "Buyer"
+  WHERE status = 'CONVERTED' AND "dealAmount" > 0
+`
+]);
+
+// Type assertions for the query results
+const typedConversionTimes = conversionTimes as Array<{ avg_days_to_convert: number; conversion_count: number }>;
+const typedFunnelData = funnelData as Array<{ status: string; count: number }>;
+const typedMonthlyData = monthlyConversionData as Array<{ month: string; avg_days_to_convert: number }>;
+const typedTotalDealValue = totalDealValue as Array<{ total_value: number }>;
+const typedAvgDealSize = avgDealSize as Array<{ avg_deal_size: number }>;
+const typedLeadsByStatus = leadsByStatus as Array<{ status: string; _count: number }>;
+const typedLeadsBySource = leadsBySource as Array<{ source: string | null; _count: number }>;
+const typedLeadsByPropertyType = leadsByPropertyType as Array<{ propertyType: string | null; _count: number }>;
+
+// Calculate metrics
+const monthlyChange = newLastMonth > 0 
+  ? Math.round(((newThisMonth as number - (newLastMonth as number)) / (newLastMonth as number)) * 100) 
+  : 0;
+
+const conversionRate = (totalLeads as number) > 0 
+  ? Math.round(((convertedLeads as number) / (totalLeads as number)) * 100) 
+  : 0;
+
+// Format conversion time
+const conversionTimeData = typedConversionTimes[0] || { avg_days_to_convert: 0, conversion_count: 0 };
+const avgConversionTime = conversionTimeData.avg_days_to_convert 
+  ? Math.round(conversionTimeData.avg_days_to_convert * 10) / 10 
+  : 0;
+
+// Format funnel data
+const conversionFunnel = typedFunnelData.map(item => ({
+  name: item.status,
+  value: Number(item.count)
+}));
+
+// Format monthly conversion timeline
+const conversionTimeline = typedMonthlyData.map(item => ({
+  month: item.month,
+  avgDays: Math.round(Number(item.avg_days_to_convert) * 10) / 10
+}));
+
+// Get deal values
+const totalValue = typedTotalDealValue[0]?.total_value || 0;
+const avgDealSizeValue = typedAvgDealSize[0]?.avg_deal_size || 0;
+
+// Format the response
+const response: ReportsResponse = {
+  metrics: {
+    totalLeads: totalLeads as number,
+    newThisMonth: newThisMonth as number,
+    monthlyChange,
+    convertedLeads: convertedLeads as number,
+    conversionRate,
+    avgConversionTime,
+    conversionCount: conversionTimeData.conversion_count || 0,
+    totalValue,
+    avgDealSize: avgDealSizeValue
+  },
+  charts: {
+    leadsByStatus: typedLeadsByStatus.map(item => ({
+      name: item.status,
+      value: typeof item._count === 'number' ? item._count : 0
+    })),
+    leadsBySource: typedLeadsBySource
+      .filter(item => item.source !== null)
+      .map(item => ({
+        name: item.source || 'Unknown',
+        value: typeof item._count === 'number' ? item._count : 0
+      })),
+    leadsByPropertyType: typedLeadsByPropertyType
+      .filter(item => item.propertyType !== null)
+      .map(item => ({
+        name: item.propertyType || 'Unknown',
+        value: typeof item._count === 'number' ? item._count : 0
+      })),
+    conversionFunnel,
+    conversionTimeline
+    // Get deal values
+    const totalValue = Array.isArray(totalDealValue) && totalDealValue[0]?.total_value 
+      ? Number(totalDealValue[0].total_value) 
+      : 0;
+
+    const avgDealSizeValue = Array.isArray(avgDealSize) && avgDealSize[0]?.avg_deal_size 
+      ? Number(avgDealSize[0].avg_deal_size) 
+      : 0;
+
+    // Format the response
+    const response: ReportsResponse = {
+      metrics: {
+        totalLeads,
+        newThisMonth,
+        monthlyChange,
+        convertedLeads,
+        conversionRate,
+        avgConversionTime,
+        conversionCount: conversionTimeData.conversion_count || 0,
+        totalValue,
+        avgDealSize: avgDealSizeValue
+      },
+      charts: {
+        leadsByStatus: Array.isArray(leadsByStatus)
+          ? leadsByStatus.map(item => ({
+              name: item.status,
+              value: typeof item._count === 'number' ? item._count : 0
+            }))
+          : [],
+        leadsBySource: Array.isArray(leadsBySource)
+          ? leadsBySource
+              .filter(item => item.source !== null)
+              .map(item => ({
+                name: item.source || 'Unknown',
+                value: typeof item._count === 'number' ? item._count : 0
+              }))
+          : [],
+        leadsByPropertyType: Array.isArray(leadsByPropertyType)
+          ? leadsByPropertyType
+              .filter(item => item.propertyType !== null)
+              .map(item => ({
+                name: item.propertyType || 'Unknown',
+                value: typeof item._count === 'number' ? item._count : 0
+              }))
+          : [],
+        conversionFunnel,
+        conversionTimeline
+      }
+    };
+
+    return NextResponse.json(response);
+  } catch (error) {
+    console.error('Error fetching reports:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch report data' },
+      { status: 500 }
+    );
+  }
+}
