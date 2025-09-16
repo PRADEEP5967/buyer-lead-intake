@@ -162,6 +162,6 @@ A small lead management app built using Next.js, TypeScript, and Postgres to cap
 
 ## 📂 Repository
 
-👉 [https://github.com/PRADEEP5967/Buyer-Lead](https://github.com/PRADEEP5967/Buyer-Lead)
+👉 [https://github.com/PRADEEP5967/Buyer-Lead](https://github.com/PRADEEP5967/buyer-lead-intake.git)
 
 ---
